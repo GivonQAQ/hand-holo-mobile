@@ -44,6 +44,25 @@ let prevGesture = "None";
 let burstEnergy = 0;
 let toastTimer = null;
 
+// ---------- motion speed + wave/throw state ----------
+let palmHistory = [];
+let speedEMA = 0;
+let pinchActivePrev = false;
+let projectiles = [];
+let impacts = [];
+let waveMarks = [];
+let lastCenterX = null;
+let lastCenterDir = 0;
+let universeActive = false;
+let universeStartedAt = 0;
+let universeCooldownUntil = 0;
+
+const THROW_MIN_SPEED = 0.42;    // px/ms flick speed needed to launch an orb
+const WAVE_SPEED_THRESHOLD = 0.85; // px/ms average speed needed to count as a "fast wave"
+const UNIVERSE_DURATION = 3000;
+const UNIVERSE_COOLDOWN = 3500;
+const GRAVITY = 0.0016; // px/ms^2, gentle arc on thrown orbs
+
 const CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
   [0,5],[5,6],[6,7],[7,8],
@@ -62,6 +81,19 @@ const GESTURE_ZH = {
   Victory: "Victory・雙環模式",
   ILoveYou: "I Love You",
   PINCH: "捏合・能量核心"
+};
+
+// Per-gesture 3D look: color, base scale/radius, which rings show, spin multiplier.
+const GESTURE_FX = {
+  PINCH:       { scale: 1.5,  radius: 45, color: 0xffd06a, ringA: true,  ringB: true,  spin: 1.0 },
+  Closed_Fist: { scale: .62,  radius: 20, color: 0x72fff3, ringA: false, ringB: false, spin: 1.6 },
+  Open_Palm:   { scale: 1.15, radius: 84, color: 0x72fff3, ringA: true,  ringB: false, spin: 1.3 },
+  Victory:     { scale: 1.05, radius: 60, color: 0x9cf2ff, ringA: true,  ringB: true,  spin: 0.9 },
+  Pointing_Up: { scale: .82,  radius: 34, color: 0x72fff3, ringA: true,  ringB: false, spin: 2.1 },
+  Thumb_Up:    { scale: 1.1,  radius: 50, color: 0xffd06a, ringA: true,  ringB: false, spin: 1.1 },
+  Thumb_Down:  { scale: .85,  radius: 42, color: 0x5a7bff, ringA: false, ringB: true,  spin: .7,  sink: true },
+  ILoveYou:    { scale: 1.2,  radius: 66, color: 0xff5fa8, ringA: true,  ringB: true,  spin: 1.4 },
+  None:        { scale: 1.0,  radius: 58, color: 0x72fff3, ringA: true,  ringB: false, spin: 1.0 }
 };
 
 // ---------- THREE.JS hologram layer ----------
@@ -107,6 +139,39 @@ const particleMat = new THREE.PointsMaterial({ color: 0x72fff3, size: 3.2, trans
 const particles = new THREE.Points(particleGeo, particleMat);
 energyGroup.add(particles);
 
+// ---------- warp-speed starfield (fast wave => "universe" mode) ----------
+const STAR_COUNT = 240;
+const starAngles = new Float32Array(STAR_COUNT);
+const starBaseR = new Float32Array(STAR_COUNT);
+const starSpeed = new Float32Array(STAR_COUNT);
+for (let i = 0; i < STAR_COUNT; i++) {
+  starAngles[i] = Math.random() * Math.PI * 2;
+  starBaseR[i] = 10 + Math.random() * 40;
+  starSpeed[i] = 0.5 + Math.random() * 1.6;
+}
+const starGeo = new THREE.BufferGeometry();
+starGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(STAR_COUNT * 3), 3));
+const starMat = new THREE.PointsMaterial({ color: 0xcfe9ff, size: 2.8, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const starField = new THREE.Points(starGeo, starMat);
+starField.visible = false;
+scene.add(starField);
+
+// A thrown energy orb: small wireframe shell + glowing core, same palette as the hand-anchored one.
+function makeOrb() {
+  const group = new THREE.Group();
+  const shell = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(9, 1),
+    new THREE.MeshBasicMaterial({ color: 0xffd06a, wireframe: true, transparent: true, opacity: .95, blending: THREE.AdditiveBlending, depthTest: false })
+  );
+  const glow = new THREE.Mesh(
+    new THREE.SphereGeometry(4, 10, 10),
+    new THREE.MeshBasicMaterial({ color: 0x72fff3, transparent: true, opacity: .85, blending: THREE.AdditiveBlending, depthTest: false })
+  );
+  group.add(shell, glow);
+  scene.add(group);
+  return { group, shell, glow };
+}
+
 function resize() {
   const dpr = Math.min(devicePixelRatio || 1, 2);
   fxCanvas.width = Math.round(innerWidth * dpr);
@@ -121,6 +186,8 @@ function resize() {
   camera.top = 0;
   camera.bottom = innerHeight;
   camera.updateProjectionMatrix();
+
+  starField.position.set(innerWidth / 2, innerHeight / 2, 0);
 }
 window.addEventListener("resize", resize, { passive: true });
 resize();
@@ -151,6 +218,176 @@ function detectPinch(landmarks) {
   if (!pinchLatched && ratio < 0.38) pinchLatched = true;
   if (pinchLatched && ratio > 0.50) pinchLatched = false;
   return { isPinch: pinchLatched, ratio };
+}
+
+// ---------- overall hand speed (drives effect intensity + wave/throw detection) ----------
+function trackHandSpeed(center, now) {
+  if (center) {
+    palmHistory.push({ x: center.x, y: center.y, t: now });
+    palmHistory = palmHistory.filter(p => now - p.t < 450);
+  } else {
+    palmHistory = [];
+  }
+
+  let speed = 0;
+  if (palmHistory.length >= 2) {
+    const a = palmHistory[0], b = palmHistory[palmHistory.length - 1];
+    const dt = Math.max(1, b.t - a.t);
+    speed = dist(a, b) / dt;
+  }
+  speedEMA = speedEMA * 0.82 + speed * 0.18;
+
+  if (center) {
+    if (lastCenterX !== null) {
+      const dx = center.x - lastCenterX;
+      const dir = dx > 3 ? 1 : dx < -3 ? -1 : 0;
+      if (dir !== 0 && lastCenterDir !== 0 && dir !== lastCenterDir) {
+        waveMarks.push(now);
+      }
+      if (dir !== 0) lastCenterDir = dir;
+    }
+    lastCenterX = center.x;
+  } else {
+    lastCenterX = null;
+    lastCenterDir = 0;
+  }
+  waveMarks = waveMarks.filter(t => now - t < 900);
+
+  if (waveMarks.length >= 4 && speedEMA > WAVE_SPEED_THRESHOLD && now > universeCooldownUntil) {
+    universeActive = true;
+    universeStartedAt = now;
+    universeCooldownUntil = now + UNIVERSE_DURATION + UNIVERSE_COOLDOWN;
+    waveMarks = [];
+    showToast("🌌 宇宙展開！！");
+  }
+}
+
+// ---------- throwable energy orb ----------
+function trySpawnThrow(now) {
+  if (trail.length < 2) return;
+  const a = trail[trail.length - 2], b = trail[trail.length - 1];
+  const dt = Math.max(1, b.t - a.t);
+  const vx = (b.x - a.x) / dt, vy = (b.y - a.y) / dt;
+  if (Math.hypot(vx, vy) < THROW_MIN_SPEED) return;
+
+  const orb = makeOrb();
+  projectiles.push({ ...orb, x: b.x, y: b.y, vx, vy, born: now, last: now, life: 1600, trailPts: [] });
+  showToast("💥 光球發射！");
+}
+
+function updateProjectiles(now) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    const dt = Math.min(48, now - p.last);
+    p.vy += GRAVITY * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.last = now;
+
+    p.group.position.set(p.x, p.y, 0);
+    p.shell.rotation.x += 0.12;
+    p.shell.rotation.y += 0.09;
+
+    const age = now - p.born;
+    const fade = Math.max(0, 1 - age / p.life);
+    p.shell.material.opacity = .95 * fade;
+    p.glow.material.opacity = .85 * fade;
+
+    p.trailPts.push({ x: p.x, y: p.y, t: now });
+    p.trailPts = p.trailPts.filter(q => now - q.t < 260);
+
+    const offscreen = p.x < -60 || p.x > innerWidth + 60 || p.y < -60 || p.y > innerHeight + 60;
+    if (age > p.life || offscreen) {
+      scene.remove(p.group);
+      impacts.push({ x: p.x, y: p.y, born: now });
+      projectiles.splice(i, 1);
+    }
+  }
+}
+
+function drawProjectileTrails(now) {
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.globalCompositeOperation = "lighter";
+  for (const p of projectiles) {
+    const pts = p.trailPts;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      const age = (now - b.t) / 260;
+      const alpha = Math.max(0, 1 - age);
+      ctx.strokeStyle = `rgba(255,208,106,${alpha * .6})`;
+      ctx.lineWidth = 1 + alpha * 4;
+      ctx.shadowColor = "rgba(255,190,70,.8)";
+      ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function drawImpacts(now) {
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (let i = impacts.length - 1; i >= 0; i--) {
+    const imp = impacts[i];
+    const age = now - imp.born;
+    const life = 480;
+    if (age > life) { impacts.splice(i, 1); continue; }
+    const progress = age / life;
+    const count = 20;
+    for (let j = 0; j < count; j++) {
+      const a = (j / count) * Math.PI * 2;
+      const r = 6 + progress * 70;
+      const x = imp.x + Math.cos(a) * r;
+      const y = imp.y + Math.sin(a) * r;
+      ctx.fillStyle = `rgba(255,208,106,${(1 - progress) * .8})`;
+      ctx.shadowColor = "#ffd06a";
+      ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.arc(x, y, 2 + (1 - progress) * 2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+// ---------- fast-wave "universe" starfield ----------
+function updateUniverse(now) {
+  if (!universeActive) { starField.visible = false; return; }
+  const t = now - universeStartedAt;
+  if (t > UNIVERSE_DURATION) { universeActive = false; starField.visible = false; return; }
+
+  starField.visible = true;
+  const growth = t * 0.62;
+  const positions = starGeo.attributes.position.array;
+  for (let i = 0; i < STAR_COUNT; i++) {
+    const r = starBaseR[i] + growth * starSpeed[i];
+    positions[i * 3] = Math.cos(starAngles[i]) * r;
+    positions[i * 3 + 1] = Math.sin(starAngles[i]) * r;
+    positions[i * 3 + 2] = 0;
+  }
+  starGeo.attributes.position.needsUpdate = true;
+
+  const fadeIn = Math.min(1, t / 260);
+  const fadeOut = 1 - Math.max(0, (t - (UNIVERSE_DURATION - 500)) / 500);
+  starMat.opacity = Math.max(0, Math.min(fadeIn, fadeOut)) * 0.9;
+  starField.rotation.z += 0.0009 * (1 + speedEMA);
+}
+
+function drawPointingLaser(pts, now) {
+  const from = pts[5], to = pts[8];
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  const beamLen = 260 + speedEMA * 140;
+  const ex = to.x + ux * beamLen, ey = to.y + uy * beamLen;
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.strokeStyle = "rgba(114,255,243,.75)";
+  ctx.lineWidth = 2.4;
+  ctx.shadowColor = "#72fff3";
+  ctx.shadowBlur = 16;
+  ctx.beginPath(); ctx.moveTo(to.x, to.y); ctx.lineTo(ex, ey); ctx.stroke();
+  ctx.restore();
 }
 
 function showToast(text) {
@@ -257,13 +494,15 @@ function updateUi(result, pinch) {
   handednessEl.textContent = handed || "—";
 }
 
-function processResult(result) {
+function processResult(result, now) {
   currentResult = result;
   const landmarks = result?.landmarks?.[0];
   if (!landmarks) {
     currentGesture = "None";
     currentConfidence = 0;
     pinchLatched = false;
+    if (pinchActivePrev) trySpawnThrow(now);
+    pinchActivePrev = false;
     updateUi(result, null);
     return;
   }
@@ -272,6 +511,9 @@ function processResult(result) {
   const canned = result?.gestures?.[0]?.[0];
   currentGesture = pinch.isPinch ? "PINCH" : (canned?.categoryName || "None");
   currentConfidence = pinch.isPinch ? Math.min(1, 1.1 - pinch.ratio) : (canned?.score || 0);
+
+  if (pinchActivePrev && !pinch.isPinch) trySpawnThrow(now);
+  pinchActivePrev = pinch.isPinch;
 
   if (currentGesture !== prevGesture && currentGesture !== "None") {
     if (currentGesture === "Open_Palm") burstEnergy = 1;
@@ -294,7 +536,7 @@ function infer(now) {
   lastVideoTime = video.currentTime;
   try {
     const result = recognizer.recognizeForVideo(video, now);
-    processResult(result);
+    processResult(result, now);
     inferenceFrames++;
   } catch (err) {
     console.warn("Inference error", err);
@@ -413,6 +655,12 @@ function drawBurst(center, now) {
 }
 
 function updateThree(landmarks, pts, now) {
+  updateProjectiles(now);
+  updateUniverse(now);
+
+  // Fast hand motion pumps up scale/spin/spread across whatever effect is active.
+  const speedMul = Math.min(3.2, 1 + speedEMA * 1.2);
+
   if (!landmarks || !pts) {
     energyGroup.visible = false;
     renderer.render(scene, camera);
@@ -423,39 +671,38 @@ function updateThree(landmarks, pts, now) {
   energyGroup.visible = true;
   energyGroup.position.set(tip.x, tip.y, 0);
 
+  const fx = GESTURE_FX[currentGesture] || GESTURE_FX.None;
   const pinch = currentGesture === "PINCH";
-  const fist = currentGesture === "Closed_Fist";
-  const open = currentGesture === "Open_Palm";
-  const victory = currentGesture === "Victory";
 
-  const pulse = 1 + Math.sin(now * .009) * .08;
-  const scale = (pinch ? 1.5 : fist ? .65 : 1.0) * pulse;
-  core.scale.setScalar(scale);
+  const pulse = 1 + Math.sin(now * .009) * (.08 + speedEMA * .06);
+  core.scale.setScalar(fx.scale * pulse);
   innerCore.scale.setScalar(pinch ? 1.45 + Math.sin(now * .02) * .18 : .9);
-  ringA.visible = !fist;
-  ringB.visible = victory || pinch;
+  ringA.visible = fx.ringA;
+  ringB.visible = fx.ringB;
   ringA.scale.setScalar(pinch ? 1.35 : 1);
-  ringB.scale.setScalar(victory ? 1.55 : pinch ? 1.15 : .8);
-  core.rotation.x += .018;
-  core.rotation.y += .025;
-  ringA.rotation.z += .028;
-  ringB.rotation.x -= .02;
+  ringB.scale.setScalar(currentGesture === "Victory" ? 1.55 : pinch ? 1.15 : .8);
+  core.rotation.x += .018 * fx.spin * speedMul;
+  core.rotation.y += .025 * fx.spin * speedMul;
+  ringA.rotation.z += .028 * fx.spin * speedMul;
+  ringB.rotation.x -= .02 * fx.spin * speedMul;
   innerCore.material.opacity = pinch ? .95 : .55;
-  particleMat.color.setHex(open ? 0x72fff3 : pinch ? 0xffd06a : 0x72fff3);
+  core.material.color.setHex(fx.color);
+  particleMat.color.setHex(fx.color);
 
-  const radiusBase = fist ? 22 : open ? 82 : pinch ? 45 : 58;
+  const radiusBase = fx.radius * Math.min(1.6, 1 + speedEMA * .5);
   const positions = particleGeo.attributes.position.array;
+  const sinkBias = fx.sink ? 40 : 0;
   for (let i = 0; i < particleCount; i++) {
     const seed = i * 12.9898;
-    const a = seed + now * (0.0007 + (i % 7) * 0.000025);
+    const a = seed + now * (0.0007 + (i % 7) * 0.000025) * fx.spin;
     const b = i * .61 + now * .0005;
     const rr = radiusBase * (.34 + ((i * 37) % 100) / 100 * .72);
     positions[i * 3] = Math.cos(a) * rr;
-    positions[i * 3 + 1] = Math.sin(a) * rr * (.52 + .36 * Math.sin(b));
+    positions[i * 3 + 1] = Math.sin(a) * rr * (.52 + .36 * Math.sin(b)) + sinkBias * (.34 + ((i * 37) % 100) / 100);
     positions[i * 3 + 2] = Math.sin(b) * 80;
   }
   particleGeo.attributes.position.needsUpdate = true;
-  particles.rotation.z += open ? .026 : .009;
+  particles.rotation.z += .009 * fx.spin * speedMul;
   particles.rotation.x = Math.sin(now * .001) * .4;
 
   renderer.render(scene, camera);
@@ -485,11 +732,25 @@ function draw(now) {
       ctx.beginPath(); ctx.arc(pts[8].x, pts[8].y, 28 + Math.sin(t) * 5, 0, Math.PI * 2); ctx.stroke();
       ctx.restore();
     }
+    if (currentGesture === "Pointing_Up") drawPointingLaser(pts, now);
   } else {
     updateTrail(null, now);
   }
 
+  trackHandSpeed(center, now);
   drawBurst(center, now);
+  drawProjectileTrails(now);
+  drawImpacts(now);
+
+  if (universeActive) {
+    const t = (now - universeStartedAt) / UNIVERSE_DURATION;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = `rgba(130,90,255,${0.06 * Math.sin(Math.min(1, t) * Math.PI)})`;
+    ctx.fillRect(0, 0, innerWidth, innerHeight);
+    ctx.restore();
+  }
+
   updateThree(landmarks, pts, now);
 }
 

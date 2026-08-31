@@ -7,8 +7,13 @@
 - 🤏 **Pinch 捏合**：拇指 + 食指靠近時顯示能量核心
 - ✊ **Closed Fist 握拳**：3D 粒子收束
 - ✋ **Open Palm 張手**：粒子爆散
-- ✌️ **Victory**：顯示雙環模式
-- 👉 **Pointing Up**、👍、👎、I Love You：顯示 MediaPipe 內建辨識結果
+- ✌️ **Victory**：雙環模式
+- 👉 **Pointing Up**：食指延伸雷射光束（方向跟著手指指向）
+- 👍 **Thumb Up** / 👎 **Thumb Down**（下沉粒子渦流）/ 🤟 **I Love You**：各自獨立配色與粒子形狀
+- 每種手勢在 [app.js](app.js) 的 `GESTURE_FX` 都有專屬顏色、能量球縮放、光環顯示、粒子擴散半徑與自轉速度
+- **動作快慢會即時放大特效**：手移動越快，能量球脈動、自轉速度、粒子擴散半徑都會等比放大（`speedEMA` 平滑後的手部移動速度）
+- 🤏💨 **捏合後快速甩開**：放開瞬間偵測到甩動速度，會把能量核心當光球丟出去，帶拋物線重力、拖尾與落地爆裂特效
+- 👋💨 **快速左右揮手**：偵測到連續方向反轉且速度夠快，會展開約 3 秒的 warp-speed 星空「宇宙模式」
 - 21 點手部骨架
 - 食指金色光線 Trail
 - 掌心科幻 HUD Reticle
@@ -110,6 +115,20 @@ if (now - lastInferenceAt < 80) return;
 會降低 AI 推論頻率、比較省電。
 
 ---
+
+## 新特效怎麼調
+
+在 `app.js` 開頭的常數可以調整手感：
+
+```js
+const THROW_MIN_SPEED = 0.42;      // 甩開多快才會丟出光球（px/ms，越小越容易丟）
+const WAVE_SPEED_THRESHOLD = 0.85; // 揮手要多快才觸發宇宙模式
+const UNIVERSE_DURATION = 3000;    // 宇宙模式維持多久（ms）
+const UNIVERSE_COOLDOWN = 3500;    // 宇宙模式結束後多久才能再觸發
+const GRAVITY = 0.0016;            // 光球拋物線重力，越大弧度越明顯
+```
+
+各手勢的顏色、能量球縮放、光環開關、粒子半徑、自轉速度集中在 `GESTURE_FX`，新增手勢效果只要在裡面加一筆設定即可。
 
 ## 下一版可以加什麼？
 
