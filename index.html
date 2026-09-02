@@ -21,7 +21,10 @@
         <div class="eyebrow">HAND // HOLO LAB</div>
         <div id="status" class="status"><span class="status-dot"></span>等待啟動</div>
       </div>
-      <button id="flipBtn" class="icon-btn" type="button" title="切換前後鏡頭" disabled>↻</button>
+      <div class="topbar-actions">
+        <button id="helpBtn" class="icon-btn" type="button" title="動作/表情教學">?</button>
+        <button id="flipBtn" class="icon-btn" type="button" title="切換前後鏡頭" disabled>↻</button>
+      </div>
     </header>
 
     <section class="left-hud hud-panel" aria-live="polite">
@@ -37,6 +40,8 @@
         <span>HAND</span><b id="handedness">—</b>
         <span>FPS</span><b id="fps">0</b>
         <span>PINCH</span><b id="pinchValue">0.00</b>
+        <span>BODY</span><b id="bodyState">—</b>
+        <span>FACE</span><b id="faceState">—</b>
       </div>
     </section>
 
@@ -51,6 +56,37 @@
     </section>
 
     <div id="toast" class="toast" role="status"></div>
+
+    <section id="helpOverlay" class="help-overlay hidden" aria-hidden="true">
+      <div class="help-card hud-panel">
+        <div class="help-head">
+          <div class="eyebrow">HOW TO PLAY</div>
+          <button id="helpCloseBtn" class="icon-btn" type="button" title="關閉">✕</button>
+        </div>
+        <div class="help-section">
+          <div class="hud-label">手勢 GESTURE</div>
+          <div class="help-row"><span>🤏</span><b>捏合</b><small>能量核心</small></div>
+          <div class="help-row"><span>✊</span><b>握拳</b><small>粒子收束</small></div>
+          <div class="help-row"><span>✋</span><b>張手</b><small>粒子爆散</small></div>
+          <div class="help-row"><span>✌️</span><b>Victory</b><small>雙環模式</small></div>
+          <div class="help-row"><span>👉</span><b>Pointing Up</b><small>指尖宇宙雷射</small></div>
+          <div class="help-row"><span>👍👎</span><b>Thumb Up / Down</b><small>能量升騰 / 下沉渦流</small></div>
+          <div class="help-row"><span>🤟</span><b>I Love You</b><small>粉紫能量</small></div>
+          <div class="help-row"><span>🤏💨</span><b>捏合後甩開</b><small>丟出光球</small></div>
+          <div class="help-row"><span>👋💨</span><b>快速左右揮手</b><small>宇宙星空模式</small></div>
+        </div>
+        <div class="help-section">
+          <div class="hud-label">全身動作 BODY</div>
+          <div class="help-row"><span>💃</span><b>持續大動作 / 跳舞</b><small>全身宇宙光環，跳久一點會展開星空</small></div>
+          <div class="help-row"><span>🙌</span><b>雙手舉高過頭</b><small>能量光柱衝天</small></div>
+        </div>
+        <div class="help-section">
+          <div class="hud-label">表情 FACE</div>
+          <div class="help-row"><span>😊</span><b>微笑</b><small>臉部金色光暈</small></div>
+          <div class="help-row"><span>😮</span><b>驚訝（張嘴＋挑眉）</b><small>臉部衝擊波</small></div>
+        </div>
+      </div>
+    </section>
 
     <section id="startPanel" class="start-panel">
       <div class="start-card">

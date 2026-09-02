@@ -1,11 +1,15 @@
 import {
   FilesetResolver,
-  GestureRecognizer
+  GestureRecognizer,
+  PoseLandmarker,
+  FaceLandmarker
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
 
 import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js";
 
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-tasks/gesture_recognizer/gesture_recognizer.task";
+const POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
+const FACE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task";
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
 
 const video = document.querySelector("#camera");
@@ -24,7 +28,12 @@ const confBar = document.querySelector("#confidenceBar");
 const handednessEl = document.querySelector("#handedness");
 const fpsEl = document.querySelector("#fps");
 const pinchValueEl = document.querySelector("#pinchValue");
+const bodyStateEl = document.querySelector("#bodyState");
+const faceStateEl = document.querySelector("#faceState");
 const toastEl = document.querySelector("#toast");
+const helpBtn = document.querySelector("#helpBtn");
+const helpOverlay = document.querySelector("#helpOverlay");
+const helpCloseBtn = document.querySelector("#helpCloseBtn");
 
 let recognizer = null;
 let stream = null;
@@ -62,6 +71,34 @@ const WAVE_SPEED_THRESHOLD = 0.85; // px/ms average speed needed to count as a "
 const UNIVERSE_DURATION = 3000;
 const UNIVERSE_COOLDOWN = 3500;
 const GRAVITY = 0.0016; // px/ms^2, gentle arc on thrown orbs
+
+// ---------- full-body pose + facial expression state ----------
+let poseLandmarker = null;
+let faceLandmarker = null;
+let inferenceTick = 0;
+
+let posePts = null;
+let prevPosePts = null;
+let danceEnergy = 0;
+let dancing = false;
+let danceSince = 0;
+let danceUniverseFired = false;
+let armsRaised = false;
+
+let facePts = null;
+let currentExpression = "Neutral";
+let prevExpression = "Neutral";
+let smileStrength = 0;
+let shockwaves = [];
+
+const POSE_TRACK_IDS = [11, 12, 15, 16, 23, 24]; // shoulders, wrists, hips
+const DANCE_ENERGY_ON = 9;     // avg px moved per pose-tick to count as "dancing"
+const DANCE_ENERGY_OFF = 3.5;  // falls back below this to stop
+const ARMS_RAISED_MARGIN = 20; // px above the nose the wrists must clear
+const SMILE_ON = 0.55;
+const SURPRISE_JAW_ON = 0.45;
+const SURPRISE_BROW_ON = 0.35;
+const NEBULA_HUES = [190, 265, 320, 45]; // teal, violet, pink, gold
 
 const CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
@@ -151,10 +188,49 @@ for (let i = 0; i < STAR_COUNT; i++) {
 }
 const starGeo = new THREE.BufferGeometry();
 starGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(STAR_COUNT * 3), 3));
-const starMat = new THREE.PointsMaterial({ color: 0xcfe9ff, size: 2.8, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const starColors = new Float32Array(STAR_COUNT * 3);
+for (let i = 0; i < STAR_COUNT; i++) {
+  const hue = NEBULA_HUES[i % NEBULA_HUES.length] + (Math.random() * 20 - 10);
+  const c = new THREE.Color(`hsl(${hue}, 85%, ${65 + Math.random() * 15}%)`);
+  starColors[i * 3] = c.r; starColors[i * 3 + 1] = c.g; starColors[i * 3 + 2] = c.b;
+}
+starGeo.setAttribute("color", new THREE.BufferAttribute(starColors, 3));
+const starMat = new THREE.PointsMaterial({ size: 2.8, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
 const starField = new THREE.Points(starGeo, starMat);
 starField.visible = false;
 scene.add(starField);
+
+// ---------- full-body cosmic aura (sustained dancing) ----------
+const AURA_COUNT = 260;
+const auraGeo = new THREE.BufferGeometry();
+auraGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(AURA_COUNT * 3), 3));
+const auraColors = new Float32Array(AURA_COUNT * 3);
+for (let i = 0; i < AURA_COUNT; i++) {
+  const hue = NEBULA_HUES[i % NEBULA_HUES.length] + (Math.random() * 24 - 12);
+  const c = new THREE.Color(`hsl(${hue}, 85%, 68%)`);
+  auraColors[i * 3] = c.r; auraColors[i * 3 + 1] = c.g; auraColors[i * 3 + 2] = c.b;
+}
+auraGeo.setAttribute("color", new THREE.BufferAttribute(auraColors, 3));
+const auraMat = new THREE.PointsMaterial({ size: 4.2, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const auraPoints = new THREE.Points(auraGeo, auraMat);
+auraPoints.visible = false;
+scene.add(auraPoints);
+
+// ---------- arms-raised energy pillar ----------
+const PILLAR_COUNT = 90;
+const pillarGeo = new THREE.BufferGeometry();
+pillarGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(PILLAR_COUNT * 3), 3));
+const pillarMat = new THREE.PointsMaterial({ size: 3.4, transparent: true, opacity: 0, color: 0xffe08a, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const pillarPoints = new THREE.Points(pillarGeo, pillarMat);
+pillarPoints.visible = false;
+scene.add(pillarPoints);
+
+// ---------- smile halo ----------
+const faceHalo = new THREE.Mesh(
+  new THREE.TorusGeometry(46, 3.2, 8, 48),
+  new THREE.MeshBasicMaterial({ color: 0xffd06a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthTest: false })
+);
+scene.add(faceHalo);
 
 // A thrown energy orb: small wireframe shell + glowing core, same palette as the hand-anchored one.
 function makeOrb() {
@@ -209,6 +285,23 @@ function dist(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+// Slowly rotating hue used to give beams/particles a "cosmic" cycling color.
+function cosmicHue(now, offset = 0) {
+  return (now * 0.03 + offset) % 360;
+}
+function cosmicHex(now, offset = 0, s = 85, l = 62) {
+  return new THREE.Color(`hsl(${cosmicHue(now, offset)}, ${s}%, ${l}%)`).getHex();
+}
+
+function triggerUniverse(now, reason) {
+  if (now <= universeCooldownUntil) return;
+  universeActive = true;
+  universeStartedAt = now;
+  universeCooldownUntil = now + UNIVERSE_DURATION + UNIVERSE_COOLDOWN;
+  waveMarks = [];
+  showToast(reason || "🌌 宇宙展開！！");
+}
+
 function detectPinch(landmarks) {
   const tipDistance = dist(landmarks[4], landmarks[8]);
   const palmWidth = Math.max(dist(landmarks[5], landmarks[17]), 0.001);
@@ -253,12 +346,8 @@ function trackHandSpeed(center, now) {
   }
   waveMarks = waveMarks.filter(t => now - t < 900);
 
-  if (waveMarks.length >= 4 && speedEMA > WAVE_SPEED_THRESHOLD && now > universeCooldownUntil) {
-    universeActive = true;
-    universeStartedAt = now;
-    universeCooldownUntil = now + UNIVERSE_DURATION + UNIVERSE_COOLDOWN;
-    waveMarks = [];
-    showToast("🌌 宇宙展開！！");
+  if (waveMarks.length >= 4 && speedEMA > WAVE_SPEED_THRESHOLD) {
+    triggerUniverse(now, "🌌 宇宙展開！！");
   }
 }
 
@@ -379,14 +468,195 @@ function drawPointingLaser(pts, now) {
   const ux = dx / len, uy = dy / len;
   const beamLen = 260 + speedEMA * 140;
   const ex = to.x + ux * beamLen, ey = to.y + uy * beamLen;
+  const hue = cosmicHue(now);
 
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
-  ctx.strokeStyle = "rgba(114,255,243,.75)";
+  ctx.strokeStyle = `hsla(${hue}, 90%, 70%, .8)`;
   ctx.lineWidth = 2.4;
-  ctx.shadowColor = "#72fff3";
+  ctx.shadowColor = `hsl(${hue}, 90%, 65%)`;
   ctx.shadowBlur = 16;
   ctx.beginPath(); ctx.moveTo(to.x, to.y); ctx.lineTo(ex, ey); ctx.stroke();
+  ctx.restore();
+}
+
+// ---------- full-body pose: dancing + arms-raised ----------
+function torsoCenter() {
+  if (!posePts) return null;
+  const ids = [11, 12, 23, 24];
+  let x = 0, y = 0;
+  for (const id of ids) { x += posePts[id].x; y += posePts[id].y; }
+  return { x: x / ids.length, y: y / ids.length };
+}
+
+function updatePoseUi() {
+  bodyStateEl.textContent = dancing
+    ? (armsRaised ? "跳舞+舉手" : "跳舞中")
+    : (armsRaised ? "舉手" : (posePts ? "偵測中" : "—"));
+}
+
+function processPose(result, now) {
+  const lm = result?.landmarks?.[0];
+  if (!lm) {
+    posePts = null;
+    prevPosePts = null;
+    danceEnergy *= 0.85;
+    if (danceEnergy < DANCE_ENERGY_OFF) dancing = false;
+    armsRaised = false;
+    updatePoseUi();
+    return;
+  }
+
+  const pts = lm.map(mapPoint);
+  posePts = pts;
+
+  if (prevPosePts) {
+    let energy = 0;
+    for (const id of POSE_TRACK_IDS) energy += dist(pts[id], prevPosePts[id]);
+    danceEnergy = danceEnergy * 0.75 + (energy / POSE_TRACK_IDS.length) * 0.25;
+  }
+  prevPosePts = pts;
+
+  if (!dancing && danceEnergy > DANCE_ENERGY_ON) {
+    dancing = true;
+    danceSince = now;
+    danceUniverseFired = false;
+    showToast("💃 舞力全開！");
+  } else if (dancing && danceEnergy < DANCE_ENERGY_OFF) {
+    dancing = false;
+  }
+
+  if (dancing && !danceUniverseFired && now - danceSince > 1200) {
+    danceUniverseFired = true;
+    triggerUniverse(now, "🌌 舞動宇宙展開！！");
+  }
+
+  armsRaised = pts[15].y < pts[0].y - ARMS_RAISED_MARGIN && pts[16].y < pts[0].y - ARMS_RAISED_MARGIN;
+
+  updatePoseUi();
+}
+
+function updateBodyAura(now) {
+  const center = dancing ? torsoCenter() : null;
+  if (!center) {
+    auraMat.opacity = Math.max(0, auraMat.opacity - 0.05);
+    if (auraMat.opacity <= 0) { auraPoints.visible = false; return; }
+  } else {
+    auraPoints.visible = true;
+    auraMat.opacity = Math.min(0.85, auraMat.opacity + 0.06);
+    auraPoints.position.set(center.x, center.y, 0);
+  }
+
+  const positions = auraGeo.attributes.position.array;
+  const radiusBase = 130 + Math.min(90, danceEnergy * 4);
+  for (let i = 0; i < AURA_COUNT; i++) {
+    const a = i * 12.9898 + now * 0.0012 * (1 + (i % 5) * 0.1);
+    const b = i * 0.71 + now * 0.0007;
+    const rr = radiusBase * (0.3 + ((i * 53) % 100) / 100 * 0.8);
+    positions[i * 3] = Math.cos(a) * rr;
+    positions[i * 3 + 1] = Math.sin(a) * rr * (0.55 + 0.35 * Math.sin(b));
+    positions[i * 3 + 2] = Math.sin(b) * 120;
+  }
+  auraGeo.attributes.position.needsUpdate = true;
+  auraPoints.rotation.z += 0.006;
+}
+
+function updatePillar(now) {
+  if (!armsRaised || !posePts) {
+    pillarMat.opacity = Math.max(0, pillarMat.opacity - 0.06);
+    if (pillarMat.opacity <= 0) { pillarPoints.visible = false; return; }
+  } else {
+    pillarPoints.visible = true;
+    pillarMat.opacity = Math.min(0.9, pillarMat.opacity + 0.08);
+    const midX = (posePts[15].x + posePts[16].x) / 2;
+    const topY = Math.min(posePts[15].y, posePts[16].y);
+    pillarPoints.position.set(midX, topY, 0);
+  }
+  pillarMat.color.setHex(cosmicHex(now));
+
+  const positions = pillarGeo.attributes.position.array;
+  for (let i = 0; i < PILLAR_COUNT; i++) {
+    const t = (i / PILLAR_COUNT + (now * 0.0009) % 1) % 1;
+    const h = -t * 420; // shoot upward (negative y = up on screen)
+    const wob = Math.sin(now * 0.006 + i) * 14 * (1 - t);
+    positions[i * 3] = wob;
+    positions[i * 3 + 1] = h;
+    positions[i * 3 + 2] = Math.cos(now * 0.004 + i) * 10;
+  }
+  pillarGeo.attributes.position.needsUpdate = true;
+}
+
+// ---------- facial expression: smile halo + surprise shockwave ----------
+function updateFaceUi() {
+  faceStateEl.textContent = currentExpression === "Neutral" ? "—" : currentExpression;
+}
+
+function processFace(result, now) {
+  const lm = result?.faceLandmarks?.[0];
+  const shapes = result?.faceBlendshapes?.[0]?.categories;
+  if (!lm || !shapes) {
+    facePts = null;
+    currentExpression = "Neutral";
+    prevExpression = "Neutral";
+    smileStrength = Math.max(0, smileStrength - 0.08);
+    updateFaceUi();
+    return;
+  }
+
+  facePts = mapPoint(lm[1]); // landmark 1 ~= nose tip
+  const score = {};
+  for (const c of shapes) score[c.categoryName] = c.score;
+
+  const smile = ((score.mouthSmileLeft || 0) + (score.mouthSmileRight || 0)) / 2;
+  const jawOpen = score.jawOpen || 0;
+  const browUp = score.browInnerUp || 0;
+  smileStrength = smileStrength * 0.7 + smile * 0.3;
+
+  let expr = "Neutral";
+  if (jawOpen > SURPRISE_JAW_ON && browUp > SURPRISE_BROW_ON) expr = "Surprise";
+  else if (smile > SMILE_ON) expr = "Smile";
+
+  if (expr !== prevExpression) {
+    if (expr === "Surprise") {
+      shockwaves.push({ x: facePts.x, y: facePts.y, born: now });
+      showToast("😮 驚訝衝擊波！");
+    } else if (expr === "Smile") {
+      showToast("😊 微笑能量！");
+    }
+    prevExpression = expr;
+  }
+  currentExpression = expr;
+  updateFaceUi();
+}
+
+function updateFaceHalo(now) {
+  if (!facePts || smileStrength < 0.08) {
+    faceHalo.material.opacity = Math.max(0, faceHalo.material.opacity - 0.05);
+    return;
+  }
+  faceHalo.position.set(facePts.x, facePts.y, 0);
+  faceHalo.material.opacity = Math.min(0.85, smileStrength);
+  faceHalo.scale.setScalar(1 + Math.sin(now * 0.006) * 0.06);
+  faceHalo.rotation.z += 0.01;
+}
+
+function drawShockwaves(now) {
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (let i = shockwaves.length - 1; i >= 0; i--) {
+    const s = shockwaves[i];
+    const age = now - s.born;
+    const life = 700;
+    if (age > life) { shockwaves.splice(i, 1); continue; }
+    const p = age / life;
+    ctx.strokeStyle = `rgba(180,220,255,${(1 - p) * .85})`;
+    ctx.lineWidth = 3 + (1 - p) * 4;
+    ctx.shadowColor = "#bcefff";
+    ctx.shadowBlur = 20;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 20 + p * 160, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -409,15 +679,31 @@ async function initRecognizer() {
   startBtn.textContent = "載入模型中…";
 
   const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-  recognizer = await GestureRecognizer.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: MODEL_URL },
-    runningMode: "VIDEO",
-    numHands: 1,
-    minHandDetectionConfidence: 0.5,
-    minHandPresenceConfidence: 0.5,
-    minTrackingConfidence: 0.5,
-    cannedGesturesClassifierOptions: { scoreThreshold: 0.45, maxResults: 1 }
-  });
+  const [hand, pose, face] = await Promise.all([
+    GestureRecognizer.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: MODEL_URL },
+      runningMode: "VIDEO",
+      numHands: 1,
+      minHandDetectionConfidence: 0.5,
+      minHandPresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+      cannedGesturesClassifierOptions: { scoreThreshold: 0.45, maxResults: 1 }
+    }),
+    PoseLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: POSE_MODEL_URL },
+      runningMode: "VIDEO",
+      numPoses: 1
+    }),
+    FaceLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: FACE_MODEL_URL },
+      runningMode: "VIDEO",
+      numFaces: 1,
+      outputFaceBlendshapes: true
+    })
+  ]);
+  recognizer = hand;
+  poseLandmarker = pose;
+  faceLandmarker = face;
 }
 
 async function startCamera() {
@@ -482,6 +768,12 @@ flipBtn.addEventListener("click", async () => {
   }
 });
 
+helpBtn.addEventListener("click", () => helpOverlay.classList.remove("hidden"));
+helpCloseBtn.addEventListener("click", () => helpOverlay.classList.add("hidden"));
+helpOverlay.addEventListener("click", (e) => {
+  if (e.target === helpOverlay) helpOverlay.classList.add("hidden");
+});
+
 function updateUi(result, pinch) {
   const gesture = currentGesture;
   gestureEl.textContent = gesture === "None" ? "SCANNING" : gesture;
@@ -539,7 +831,20 @@ function infer(now) {
     processResult(result, now);
     inferenceFrames++;
   } catch (err) {
-    console.warn("Inference error", err);
+    console.warn("Hand inference error", err);
+  }
+
+  // Pose and face are heavier models; alternate them across ticks so hand
+  // tracking (the core interaction) keeps its full inference rate.
+  inferenceTick++;
+  try {
+    if (inferenceTick % 2 === 0) {
+      if (poseLandmarker) processPose(poseLandmarker.detectForVideo(video, now), now);
+    } else {
+      if (faceLandmarker) processFace(faceLandmarker.detectForVideo(video, now), now);
+    }
+  } catch (err) {
+    console.warn("Pose/face inference error", err);
   }
 
   if (now - fpsWindowStart >= 1000) {
@@ -657,6 +962,9 @@ function drawBurst(center, now) {
 function updateThree(landmarks, pts, now) {
   updateProjectiles(now);
   updateUniverse(now);
+  updateBodyAura(now);
+  updatePillar(now);
+  updateFaceHalo(now);
 
   // Fast hand motion pumps up scale/spin/spread across whatever effect is active.
   const speedMul = Math.min(3.2, 1 + speedEMA * 1.2);
@@ -741,12 +1049,21 @@ function draw(now) {
   drawBurst(center, now);
   drawProjectileTrails(now);
   drawImpacts(now);
+  drawShockwaves(now);
 
   if (universeActive) {
     const t = (now - universeStartedAt) / UNIVERSE_DURATION;
+    const alpha = 0.9 * Math.sin(Math.min(1, t) * Math.PI);
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    ctx.fillStyle = `rgba(130,90,255,${0.06 * Math.sin(Math.min(1, t) * Math.PI)})`;
+    const g = ctx.createRadialGradient(
+      innerWidth / 2, innerHeight / 2, 0,
+      innerWidth / 2, innerHeight / 2, Math.max(innerWidth, innerHeight) * 0.7
+    );
+    g.addColorStop(0, `rgba(255,210,140,${0.05 * alpha})`);
+    g.addColorStop(0.45, `rgba(160,110,255,${0.05 * alpha})`);
+    g.addColorStop(1, "rgba(20,10,40,0)");
+    ctx.fillStyle = g;
     ctx.fillRect(0, 0, innerWidth, innerHeight);
     ctx.restore();
   }

@@ -1,6 +1,6 @@
 # Hand Holo Lab — 手機手勢科幻 HUD Demo
 
-這是一個 **純前端** Demo：手機相機 → MediaPipe Gesture Recognizer → 手部 21 點 → Canvas HUD / 光軌 → Three.js 3D 能量球與粒子。
+這是一個 **純前端** Demo：手機相機 → MediaPipe（手勢 + 全身姿勢 + 臉部表情）→ Canvas HUD / 光軌 → Three.js 3D 能量球、宇宙星空與粒子。
 
 ## 已做好的互動
 
@@ -20,10 +20,32 @@
 - 前 / 後鏡頭切換
 - 手機友善、無 build step
 
+### 全身動作（新增）
+
+- 💃 **持續大動作 / 跳舞**：偵測肩膀、手腕、髖部的移動能量（`danceEnergy`），超過門檻進入「跳舞中」狀態，觸發一圈跟著身體中心飄動的全身宇宙光環（`auraPoints`）；跳超過 1.2 秒還會自動展開一次宇宙星空模式
+- 🙌 **雙手舉高過頭**：兩手腕都高於鼻子，觸發一道往上衝的金黃能量光柱（`pillarPoints`）
+
+### 表情（新增）
+
+用 MediaPipe FaceLandmarker 的 52 種表情強度分數（blendshapes）判斷：
+
+- 😊 **微笑**：`mouthSmileLeft/Right` 平均超過門檻，臉部出現金色光暈環，強度跟笑的程度連動
+- 😮 **驚訝**：`jawOpen`（張嘴）+ `browInnerUp`（挑眉）同時超過門檻，觸發從臉部炸開的衝擊波
+
+點畫面右上角的 **?** 按鈕可以打開完整的「動作/表情對照教學」，列出所有手勢、全身動作、表情各自對應的效果。
+
+### 宇宙感強化（新增）
+
+- 星空/光暈/光柱都改用星雲色票（青、紫、粉、金）而不是單一顏色，看起來更有銀河感
+- 指向手勢的雷射光束改成隨時間緩慢轉色（`cosmicHue`），視覺上更像宇宙能量而不是單色雷射
+- 宇宙模式的螢幕色調從單一淡紫平塗改成中心放射的星雲漸層（金→紫→透明）
+
 ## 技術
 
 - `@mediapipe/tasks-vision@1.0.1`
-- MediaPipe Gesture Recognizer 官方模型
+  - `GestureRecognizer`：手勢 + 21 點手部
+  - `PoseLandmarker`（lite 版）：33 點全身姿勢
+  - `FaceLandmarker`：478 點臉部網格 + 52 種表情 blendshape 分數
 - `three@0.185.1`
 - HTML / CSS / JavaScript
 - 不需要 Python、Node.js、TouchDesigner
@@ -100,6 +122,10 @@ MediaPipe 官方 Gesture Recognizer 內建：
 
 AI 推論刻意限制在約 18–20 FPS，但畫面特效會跟螢幕刷新率持續繪製。這樣比每個 animation frame 都跑 AI 更適合手機。
 
+現在同時跑 3 個模型（手勢、姿勢、表情），姿勢和表情比手勢重很多，所以做法是：**手勢每個推論 tick 都跑（維持原本手感），姿勢和表情兩個輪流跑**（`app.js` 的 `infer()` 用 `inferenceTick % 2` 切換），單獨姿勢/表情的更新頻率大約是手勢的一半。
+
+**啟動時間也會變長**：第一次啟動要下載 3 個模型（手勢+姿勢+表情），比原本只下載手勢模型慢。活動現場建議提前用同一台裝置開一次頁面暖機（瀏覽器快取住模型檔案），正式上場才不會讓排隊的人等太久。
+
 如果手機偏舊，可在 `app.js` 找到：
 
 ```js
@@ -112,7 +138,7 @@ if (now - lastInferenceAt < 52) return;
 if (now - lastInferenceAt < 80) return;
 ```
 
-會降低 AI 推論頻率、比較省電。
+會降低 AI 推論頻率、比較省電。也可以把 `PoseLandmarker` / `FaceLandmarker` 其中一個註解掉不建立，如果活動只需要其中一種效果。
 
 ---
 
@@ -130,6 +156,19 @@ const GRAVITY = 0.0016;            // 光球拋物線重力，越大弧度越明
 
 各手勢的顏色、能量球縮放、光環開關、粒子半徑、自轉速度集中在 `GESTURE_FX`，新增手勢效果只要在裡面加一筆設定即可。
 
+全身動作 / 表情的門檻常數：
+
+```js
+const DANCE_ENERGY_ON = 9;     // 平均移動速度多快算「開始跳舞」
+const DANCE_ENERGY_OFF = 3.5;  // 降到多慢算「停止跳舞」
+const ARMS_RAISED_MARGIN = 20; // 手腕要高於鼻子多少 px 才算舉手
+const SMILE_ON = 0.55;         // 笑的 blendshape 分數門檻（0-1）
+const SURPRISE_JAW_ON = 0.45;  // 張嘴分數門檻
+const SURPRISE_BROW_ON = 0.35; // 挑眉分數門檻
+```
+
+覺得跳舞太容易/太難觸發，調 `DANCE_ENERGY_ON`；覺得笑一下就觸發太敏感，調高 `SMILE_ON`。
+
 ## 下一版可以加什麼？
 
 1. 兩手同時辨識：雙手拉開生成能量球。
@@ -138,3 +177,4 @@ const GRAVITY = 0.0016;            // 光球拋物線重力，越大弧度越明
 4. 手勢切換技能與粒子 Shader。
 5. 錄影按鈕。
 6. WebSocket 把手機座標送到電腦 TouchDesigner。
+7. 多人同時偵測（現在姿勢/表情都只認第一個人，`numPoses`/`numFaces` 都設 1）。
