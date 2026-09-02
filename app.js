@@ -86,18 +86,20 @@ let danceUniverseFired = false;
 let armsRaised = false;
 
 let facePts = null;
+let faceScale = 90; // px proxy for on-screen face size, used to scale the smile halo
 let currentExpression = "Neutral";
 let prevExpression = "Neutral";
 let smileStrength = 0;
 let shockwaves = [];
 
 const POSE_TRACK_IDS = [11, 12, 15, 16, 23, 24]; // shoulders, wrists, hips
-const DANCE_ENERGY_ON = 9;     // avg px moved per pose-tick to count as "dancing"
-const DANCE_ENERGY_OFF = 3.5;  // falls back below this to stop
+const DANCE_ENERGY_ON = 5.5;   // avg px moved per pose-tick to count as "dancing" (lower = easier to trigger)
+const DANCE_ENERGY_OFF = 2.2;  // falls back below this to stop
+const DANCE_UNIVERSE_DELAY = 700; // ms of sustained dancing before it opens the starfield
 const ARMS_RAISED_MARGIN = 20; // px above the nose the wrists must clear
-const SMILE_ON = 0.55;
-const SURPRISE_JAW_ON = 0.45;
-const SURPRISE_BROW_ON = 0.35;
+const SMILE_ON = 0.32;         // blendshape score rarely gets near 1.0 for a natural smile
+const SURPRISE_JAW_ON = 0.35;
+const SURPRISE_BROW_ON = 0.28;
 const NEBULA_HUES = [190, 265, 320, 45]; // teal, violet, pink, gold
 
 const CONNECTIONS = [
@@ -146,6 +148,22 @@ const energyGroup = new THREE.Group();
 scene.add(energyGroup);
 energyGroup.visible = false;
 
+// ---------- shared soft-glow dot texture (every particle uses this instead of a flat square) ----------
+function makeGlowTexture() {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const c = canvas.getContext("2d");
+  const g = c.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.35, "rgba(255,255,255,.55)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  c.fillStyle = g;
+  c.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(canvas);
+}
+const glowTexture = makeGlowTexture();
+
 const core = new THREE.Mesh(
   new THREE.IcosahedronGeometry(18, 1),
   new THREE.MeshBasicMaterial({ color: 0x72fff3, wireframe: true, transparent: true, opacity: .9, blending: THREE.AdditiveBlending, depthTest: false })
@@ -168,16 +186,16 @@ ringB.rotation.y = 1.17;
 ringB.scale.setScalar(.78);
 energyGroup.add(ringA, ringB);
 
-const particleCount = 180;
+const particleCount = 260;
 const particlePositions = new Float32Array(particleCount * 3);
 const particleGeo = new THREE.BufferGeometry();
 particleGeo.setAttribute("position", new THREE.BufferAttribute(particlePositions, 3));
-const particleMat = new THREE.PointsMaterial({ color: 0x72fff3, size: 3.2, transparent: true, opacity: .72, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const particleMat = new THREE.PointsMaterial({ map: glowTexture, color: 0x72fff3, size: 6, transparent: true, opacity: .95, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
 const particles = new THREE.Points(particleGeo, particleMat);
 energyGroup.add(particles);
 
 // ---------- warp-speed starfield (fast wave => "universe" mode) ----------
-const STAR_COUNT = 240;
+const STAR_COUNT = 460;
 const starAngles = new Float32Array(STAR_COUNT);
 const starBaseR = new Float32Array(STAR_COUNT);
 const starSpeed = new Float32Array(STAR_COUNT);
@@ -195,13 +213,18 @@ for (let i = 0; i < STAR_COUNT; i++) {
   starColors[i * 3] = c.r; starColors[i * 3 + 1] = c.g; starColors[i * 3 + 2] = c.b;
 }
 starGeo.setAttribute("color", new THREE.BufferAttribute(starColors, 3));
-const starMat = new THREE.PointsMaterial({ size: 2.8, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const starMat = new THREE.PointsMaterial({ map: glowTexture, size: 6.5, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
 const starField = new THREE.Points(starGeo, starMat);
 starField.visible = false;
 scene.add(starField);
 
+// light-trail tracker: samples a subset of star particles' actual on-screen
+// position each frame and draws fading streaks behind them (see drawParticleTrail).
+const STAR_TRAIL = { indices: Array.from({ length: 60 }, (_, k) => Math.floor(k * STAR_COUNT / 60)), history: [] };
+STAR_TRAIL.history = STAR_TRAIL.indices.map(() => []);
+
 // ---------- full-body cosmic aura (sustained dancing) ----------
-const AURA_COUNT = 260;
+const AURA_COUNT = 480;
 const auraGeo = new THREE.BufferGeometry();
 auraGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(AURA_COUNT * 3), 3));
 const auraColors = new Float32Array(AURA_COUNT * 3);
@@ -211,26 +234,51 @@ for (let i = 0; i < AURA_COUNT; i++) {
   auraColors[i * 3] = c.r; auraColors[i * 3 + 1] = c.g; auraColors[i * 3 + 2] = c.b;
 }
 auraGeo.setAttribute("color", new THREE.BufferAttribute(auraColors, 3));
-const auraMat = new THREE.PointsMaterial({ size: 4.2, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const auraMat = new THREE.PointsMaterial({ map: glowTexture, size: 9.5, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
 const auraPoints = new THREE.Points(auraGeo, auraMat);
 auraPoints.visible = false;
 scene.add(auraPoints);
 
+// same idea as STAR_TRAIL but for the body-aura ring, so the nebula leaves flowing light streaks as it swirls.
+const AURA_TRAIL = { indices: Array.from({ length: 48 }, (_, k) => Math.floor(k * AURA_COUNT / 48)), history: [] };
+AURA_TRAIL.history = AURA_TRAIL.indices.map(() => []);
+
+// second, larger ring of aura particles orbiting further out for a "bigger than the body" feel
+const AURA_OUTER_COUNT = 220;
+const auraOuterGeo = new THREE.BufferGeometry();
+auraOuterGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(AURA_OUTER_COUNT * 3), 3));
+const auraOuterColors = new Float32Array(AURA_OUTER_COUNT * 3);
+for (let i = 0; i < AURA_OUTER_COUNT; i++) {
+  const hue = NEBULA_HUES[(i + 2) % NEBULA_HUES.length] + (Math.random() * 24 - 12);
+  const c = new THREE.Color(`hsl(${hue}, 90%, 72%)`);
+  auraOuterColors[i * 3] = c.r; auraOuterColors[i * 3 + 1] = c.g; auraOuterColors[i * 3 + 2] = c.b;
+}
+auraOuterGeo.setAttribute("color", new THREE.BufferAttribute(auraOuterColors, 3));
+const auraOuterMat = new THREE.PointsMaterial({ map: glowTexture, size: 6.5, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const auraOuterPoints = new THREE.Points(auraOuterGeo, auraOuterMat);
+auraOuterPoints.visible = false;
+scene.add(auraOuterPoints);
+
 // ---------- arms-raised energy pillar ----------
-const PILLAR_COUNT = 90;
+const PILLAR_COUNT = 160;
 const pillarGeo = new THREE.BufferGeometry();
 pillarGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(PILLAR_COUNT * 3), 3));
-const pillarMat = new THREE.PointsMaterial({ size: 3.4, transparent: true, opacity: 0, color: 0xffe08a, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const pillarMat = new THREE.PointsMaterial({ map: glowTexture, size: 7.5, transparent: true, opacity: 0, color: 0xffe08a, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
 const pillarPoints = new THREE.Points(pillarGeo, pillarMat);
 pillarPoints.visible = false;
 scene.add(pillarPoints);
 
 // ---------- smile halo ----------
 const faceHalo = new THREE.Mesh(
-  new THREE.TorusGeometry(46, 3.2, 8, 48),
+  new THREE.TorusGeometry(46, 4.5, 10, 56),
   new THREE.MeshBasicMaterial({ color: 0xffd06a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthTest: false })
 );
 scene.add(faceHalo);
+const faceHalo2 = new THREE.Mesh(
+  new THREE.TorusGeometry(64, 2.4, 10, 56),
+  new THREE.MeshBasicMaterial({ color: 0xff9ad6, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthTest: false })
+);
+scene.add(faceHalo2);
 
 // A thrown energy orb: small wireframe shell + glowing core, same palette as the hand-anchored one.
 function makeOrb() {
@@ -291,6 +339,86 @@ function cosmicHue(now, offset = 0) {
 }
 function cosmicHex(now, offset = 0, s = 85, l = 62) {
   return new THREE.Color(`hsl(${cosmicHue(now, offset)}, ${s}%, ${l}%)`).getHex();
+}
+
+// Samples a subset of a Points object's particles each frame and remembers their
+// actual on-screen position (local position transformed by the object's own
+// position + z-rotation), so drawParticleTrail can draw fading light streaks
+// behind them on the 2D canvas without tracking all hundreds of particles.
+function trackParticleTrail(tracker, pointsObj, positions, now, life, active) {
+  const rot = pointsObj.rotation.z;
+  const cosR = Math.cos(rot), sinR = Math.sin(rot);
+  for (let k = 0; k < tracker.indices.length; k++) {
+    const hist = tracker.history[k];
+    if (active) {
+      const i = tracker.indices[k];
+      const lx = positions[i * 3], ly = positions[i * 3 + 1];
+      hist.push({
+        x: pointsObj.position.x + (lx * cosR - ly * sinR),
+        y: pointsObj.position.y + (lx * sinR + ly * cosR),
+        t: now
+      });
+    }
+    while (hist.length && now - hist[0].t > life) hist.shift();
+  }
+}
+
+function drawParticleTrail(tracker, colors, now, life, widthMul = 1) {
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.globalCompositeOperation = "lighter";
+  for (let k = 0; k < tracker.indices.length; k++) {
+    const i = tracker.indices[k];
+    const r = Math.round(colors[i * 3] * 255), g = Math.round(colors[i * 3 + 1] * 255), b = Math.round(colors[i * 3 + 2] * 255);
+    const hist = tracker.history[k];
+    for (let j = 1; j < hist.length; j++) {
+      const a = hist[j - 1], bp = hist[j];
+      const alpha = Math.max(0, 1 - (now - bp.t) / life);
+      if (alpha <= 0) continue;
+      ctx.strokeStyle = `rgba(${r},${g},${b},${alpha * .85})`;
+      ctx.lineWidth = (1.2 + alpha * 3.2) * widthMul;
+      ctx.shadowColor = `rgba(${r},${g},${b},.9)`;
+      ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(bp.x, bp.y); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+// Soft radial-gradient halo on the 2D overlay canvas — same technique as the
+// universe-mode screen tint below, just re-usable for any glow (dance aura,
+// energy pillar, smile halo). Additive blending means draw order doesn't matter.
+function drawGlow(x, y, radius, hue, alpha) {
+  if (alpha <= 0 || radius <= 0) return;
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
+  g.addColorStop(0, `hsla(${hue},90%,72%,${alpha})`);
+  g.addColorStop(0.5, `hsla(${(hue + 50) % 360},90%,62%,${alpha * 0.5})`);
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawCosmicGlows(now) {
+  if (dancing) {
+    const center = torsoCenter();
+    if (center) {
+      const r = (190 + Math.min(160, danceEnergy * 6)) * 1.7;
+      drawGlow(center.x, center.y, r, cosmicHue(now), Math.min(0.5, auraMat.opacity * 0.55));
+    }
+  }
+  if (armsRaised && posePts) {
+    const midX = (posePts[15].x + posePts[16].x) / 2;
+    const topY = Math.min(posePts[15].y, posePts[16].y);
+    drawGlow(midX, topY, 190, cosmicHue(now), Math.min(0.55, pillarMat.opacity * 0.6));
+  }
+  if (facePts && smileStrength > 0.05) {
+    const strength = Math.min(1, smileStrength * 1.9);
+    const scale = Math.max(0.8, faceScale / 55);
+    drawGlow(facePts.x, facePts.y, 140 * scale, 45, strength * 0.6);
+  }
 }
 
 function triggerUniverse(now, reason) {
@@ -440,7 +568,11 @@ function drawImpacts(now) {
 
 // ---------- fast-wave "universe" starfield ----------
 function updateUniverse(now) {
-  if (!universeActive) { starField.visible = false; return; }
+  if (!universeActive) {
+    starField.visible = false;
+    trackParticleTrail(STAR_TRAIL, starField, starGeo.attributes.position.array, now, 320, false);
+    return;
+  }
   const t = now - universeStartedAt;
   if (t > UNIVERSE_DURATION) { universeActive = false; starField.visible = false; return; }
 
@@ -457,8 +589,10 @@ function updateUniverse(now) {
 
   const fadeIn = Math.min(1, t / 260);
   const fadeOut = 1 - Math.max(0, (t - (UNIVERSE_DURATION - 500)) / 500);
-  starMat.opacity = Math.max(0, Math.min(fadeIn, fadeOut)) * 0.9;
+  const envelope = Math.max(0, Math.min(fadeIn, fadeOut));
+  starMat.opacity = envelope * 0.95;
   starField.rotation.z += 0.0009 * (1 + speedEMA);
+  trackParticleTrail(STAR_TRAIL, starField, positions, now, 320, true);
 }
 
 function drawPointingLaser(pts, now) {
@@ -526,7 +660,7 @@ function processPose(result, now) {
     dancing = false;
   }
 
-  if (dancing && !danceUniverseFired && now - danceSince > 1200) {
+  if (dancing && !danceUniverseFired && now - danceSince > DANCE_UNIVERSE_DELAY) {
     danceUniverseFired = true;
     triggerUniverse(now, "🌌 舞動宇宙展開！！");
   }
@@ -540,15 +674,19 @@ function updateBodyAura(now) {
   const center = dancing ? torsoCenter() : null;
   if (!center) {
     auraMat.opacity = Math.max(0, auraMat.opacity - 0.05);
-    if (auraMat.opacity <= 0) { auraPoints.visible = false; return; }
+    auraOuterMat.opacity = Math.max(0, auraOuterMat.opacity - 0.05);
+    if (auraMat.opacity <= 0) { auraPoints.visible = false; auraOuterPoints.visible = false; return; }
   } else {
     auraPoints.visible = true;
-    auraMat.opacity = Math.min(0.85, auraMat.opacity + 0.06);
+    auraOuterPoints.visible = true;
+    auraMat.opacity = Math.min(1, auraMat.opacity + 0.08);
+    auraOuterMat.opacity = Math.min(0.75, auraOuterMat.opacity + 0.06);
     auraPoints.position.set(center.x, center.y, 0);
+    auraOuterPoints.position.set(center.x, center.y, 0);
   }
 
+  const radiusBase = 190 + Math.min(160, danceEnergy * 6);
   const positions = auraGeo.attributes.position.array;
-  const radiusBase = 130 + Math.min(90, danceEnergy * 4);
   for (let i = 0; i < AURA_COUNT; i++) {
     const a = i * 12.9898 + now * 0.0012 * (1 + (i % 5) * 0.1);
     const b = i * 0.71 + now * 0.0007;
@@ -559,6 +697,20 @@ function updateBodyAura(now) {
   }
   auraGeo.attributes.position.needsUpdate = true;
   auraPoints.rotation.z += 0.006;
+  trackParticleTrail(AURA_TRAIL, auraPoints, positions, now, 420, !!center);
+
+  const outerRadiusBase = radiusBase * 1.9;
+  const outerPositions = auraOuterGeo.attributes.position.array;
+  for (let i = 0; i < AURA_OUTER_COUNT; i++) {
+    const a = i * 9.37 - now * 0.0006 * (1 + (i % 4) * 0.08);
+    const b = i * 0.53 + now * 0.0004;
+    const rr = outerRadiusBase * (0.6 + ((i * 41) % 100) / 100 * 0.55);
+    outerPositions[i * 3] = Math.cos(a) * rr;
+    outerPositions[i * 3 + 1] = Math.sin(a) * rr * (0.6 + 0.3 * Math.sin(b));
+    outerPositions[i * 3 + 2] = Math.sin(b) * 160;
+  }
+  auraOuterGeo.attributes.position.needsUpdate = true;
+  auraOuterPoints.rotation.z -= 0.0035;
 }
 
 function updatePillar(now) {
@@ -567,7 +719,7 @@ function updatePillar(now) {
     if (pillarMat.opacity <= 0) { pillarPoints.visible = false; return; }
   } else {
     pillarPoints.visible = true;
-    pillarMat.opacity = Math.min(0.9, pillarMat.opacity + 0.08);
+    pillarMat.opacity = Math.min(1, pillarMat.opacity + 0.1);
     const midX = (posePts[15].x + posePts[16].x) / 2;
     const topY = Math.min(posePts[15].y, posePts[16].y);
     pillarPoints.position.set(midX, topY, 0);
@@ -577,11 +729,11 @@ function updatePillar(now) {
   const positions = pillarGeo.attributes.position.array;
   for (let i = 0; i < PILLAR_COUNT; i++) {
     const t = (i / PILLAR_COUNT + (now * 0.0009) % 1) % 1;
-    const h = -t * 420; // shoot upward (negative y = up on screen)
-    const wob = Math.sin(now * 0.006 + i) * 14 * (1 - t);
+    const h = -t * 520; // shoot upward (negative y = up on screen)
+    const wob = Math.sin(now * 0.006 + i) * 18 * (1 - t);
     positions[i * 3] = wob;
     positions[i * 3 + 1] = h;
-    positions[i * 3 + 2] = Math.cos(now * 0.004 + i) * 10;
+    positions[i * 3 + 2] = Math.cos(now * 0.004 + i) * 12;
   }
   pillarGeo.attributes.position.needsUpdate = true;
 }
@@ -604,13 +756,17 @@ function processFace(result, now) {
   }
 
   facePts = mapPoint(lm[1]); // landmark 1 ~= nose tip
+  const eyeL = mapPoint(lm[33]);
+  const eyeR = mapPoint(lm[263]);
+  faceScale = Math.max(30, dist(eyeL, eyeR) * 2.2); // proxy for on-screen face width
+
   const score = {};
   for (const c of shapes) score[c.categoryName] = c.score;
 
   const smile = ((score.mouthSmileLeft || 0) + (score.mouthSmileRight || 0)) / 2;
   const jawOpen = score.jawOpen || 0;
   const browUp = score.browInnerUp || 0;
-  smileStrength = smileStrength * 0.7 + smile * 0.3;
+  smileStrength = smileStrength * 0.55 + smile * 0.45;
 
   let expr = "Neutral";
   if (jawOpen > SURPRISE_JAW_ON && browUp > SURPRISE_BROW_ON) expr = "Surprise";
@@ -630,14 +786,26 @@ function processFace(result, now) {
 }
 
 function updateFaceHalo(now) {
-  if (!facePts || smileStrength < 0.08) {
+  if (!facePts || smileStrength < 0.05) {
     faceHalo.material.opacity = Math.max(0, faceHalo.material.opacity - 0.05);
+    faceHalo2.material.opacity = Math.max(0, faceHalo2.material.opacity - 0.05);
     return;
   }
+
+  const strength = Math.min(1, smileStrength * 1.9);
+  const scale = Math.max(0.8, faceScale / 55);
+  const pulse = 1 + Math.sin(now * 0.006) * 0.06;
+
   faceHalo.position.set(facePts.x, facePts.y, 0);
-  faceHalo.material.opacity = Math.min(0.85, smileStrength);
-  faceHalo.scale.setScalar(1 + Math.sin(now * 0.006) * 0.06);
+  faceHalo2.position.set(facePts.x, facePts.y, 0);
+
+  faceHalo.material.opacity = Math.min(0.95, strength);
+  faceHalo2.material.opacity = Math.min(0.7, strength * 0.8);
+
+  faceHalo.scale.setScalar(scale * pulse);
+  faceHalo2.scale.setScalar(scale * (1 + Math.sin(now * 0.005 + 1) * 0.08));
   faceHalo.rotation.z += 0.01;
+  faceHalo2.rotation.z -= 0.008;
 }
 
 function drawShockwaves(now) {
@@ -1050,6 +1218,9 @@ function draw(now) {
   drawProjectileTrails(now);
   drawImpacts(now);
   drawShockwaves(now);
+  drawParticleTrail(AURA_TRAIL, auraColors, now, 420);
+  drawParticleTrail(STAR_TRAIL, starColors, now, 320, 1.3);
+  drawCosmicGlows(now);
 
   if (universeActive) {
     const t = (now - universeStartedAt) / UNIVERSE_DURATION;
@@ -1060,8 +1231,8 @@ function draw(now) {
       innerWidth / 2, innerHeight / 2, 0,
       innerWidth / 2, innerHeight / 2, Math.max(innerWidth, innerHeight) * 0.7
     );
-    g.addColorStop(0, `rgba(255,210,140,${0.05 * alpha})`);
-    g.addColorStop(0.45, `rgba(160,110,255,${0.05 * alpha})`);
+    g.addColorStop(0, `rgba(255,210,140,${0.1 * alpha})`);
+    g.addColorStop(0.45, `rgba(160,110,255,${0.1 * alpha})`);
     g.addColorStop(1, "rgba(20,10,40,0)");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, innerWidth, innerHeight);
