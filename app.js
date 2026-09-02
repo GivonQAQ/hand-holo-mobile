@@ -234,7 +234,8 @@ for (let i = 0; i < AURA_COUNT; i++) {
   auraColors[i * 3] = c.r; auraColors[i * 3 + 1] = c.g; auraColors[i * 3 + 2] = c.b;
 }
 auraGeo.setAttribute("color", new THREE.BufferAttribute(auraColors, 3));
-const auraMat = new THREE.PointsMaterial({ map: glowTexture, size: 9.5, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const auraBaseColors = auraColors.slice(); // immutable copy — auraColors itself gets re-tinted per frame for the twinkle
+const auraMat = new THREE.PointsMaterial({ map: glowTexture, size: 5.5, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
 const auraPoints = new THREE.Points(auraGeo, auraMat);
 auraPoints.visible = false;
 scene.add(auraPoints);
@@ -254,7 +255,8 @@ for (let i = 0; i < AURA_OUTER_COUNT; i++) {
   auraOuterColors[i * 3] = c.r; auraOuterColors[i * 3 + 1] = c.g; auraOuterColors[i * 3 + 2] = c.b;
 }
 auraOuterGeo.setAttribute("color", new THREE.BufferAttribute(auraOuterColors, 3));
-const auraOuterMat = new THREE.PointsMaterial({ map: glowTexture, size: 6.5, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
+const auraOuterBaseColors = auraOuterColors.slice();
+const auraOuterMat = new THREE.PointsMaterial({ map: glowTexture, size: 4.2, transparent: true, opacity: 0, vertexColors: true, blending: THREE.AdditiveBlending, depthTest: false, sizeAttenuation: false });
 const auraOuterPoints = new THREE.Points(auraOuterGeo, auraOuterMat);
 auraOuterPoints.visible = false;
 scene.add(auraOuterPoints);
@@ -402,10 +404,11 @@ function drawGlow(x, y, radius, hue, alpha) {
 }
 
 function drawCosmicGlows(now) {
-  if (dancing) {
+  if (dancing && posePts) {
     const center = torsoCenter();
     if (center) {
-      const r = (190 + Math.min(160, danceEnergy * 6)) * 1.7;
+      const bodyScale = Math.max(60, dist(posePts[11], posePts[23]));
+      const r = bodyScale * 2.6;
       drawGlow(center.x, center.y, r, cosmicHue(now), Math.min(0.5, auraMat.opacity * 0.55));
     }
   }
@@ -623,6 +626,42 @@ function torsoCenter() {
   return { x: x / ids.length, y: y / ids.length };
 }
 
+// A rough loop around the body's silhouette (head -> arm -> leg -> other leg
+// -> other arm -> head) used to keep the aura fairy-dust hugging the outline
+// instead of ballooning out from a single point in the chest.
+const BODY_OUTLINE_IDS = [0, 11, 13, 15, 23, 25, 27, 28, 26, 24, 16, 14, 12, 0];
+
+function buildBodyOutline(pts) {
+  const nodes = BODY_OUTLINE_IDS.map(id => pts[id]);
+  const segLens = [];
+  let total = 0;
+  for (let i = 1; i < nodes.length; i++) {
+    const d = Math.max(1, dist(nodes[i - 1], nodes[i]));
+    segLens.push(d);
+    total += d;
+  }
+  return { nodes, segLens, total };
+}
+
+// Walks t (0-1, wraps around) along the outline loop and returns the point
+// there plus the outward-ish normal, so particles can float just outside it.
+function pointOnOutline(outline, t) {
+  let target = (((t % 1) + 1) % 1) * outline.total;
+  for (let i = 0; i < outline.segLens.length; i++) {
+    const segLen = outline.segLens[i];
+    if (target <= segLen || i === outline.segLens.length - 1) {
+      const a = outline.nodes[i], b = outline.nodes[i + 1];
+      const frac = segLen > 0 ? target / segLen : 0;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      return { x: a.x + dx * frac, y: a.y + dy * frac, nx: -dy / len, ny: dx / len };
+    }
+    target -= segLen;
+  }
+  const last = outline.nodes[outline.nodes.length - 1];
+  return { x: last.x, y: last.y, nx: 0, ny: -1 };
+}
+
 function updatePoseUi() {
   bodyStateEl.textContent = dancing
     ? (armsRaised ? "跳舞+舉手" : "跳舞中")
@@ -671,46 +710,62 @@ function processPose(result, now) {
 }
 
 function updateBodyAura(now) {
-  const center = dancing ? torsoCenter() : null;
-  if (!center) {
+  const active = dancing && !!posePts;
+  if (!active) {
     auraMat.opacity = Math.max(0, auraMat.opacity - 0.05);
     auraOuterMat.opacity = Math.max(0, auraOuterMat.opacity - 0.05);
-    if (auraMat.opacity <= 0) { auraPoints.visible = false; auraOuterPoints.visible = false; return; }
-  } else {
-    auraPoints.visible = true;
-    auraOuterPoints.visible = true;
-    auraMat.opacity = Math.min(1, auraMat.opacity + 0.08);
-    auraOuterMat.opacity = Math.min(0.75, auraOuterMat.opacity + 0.06);
-    auraPoints.position.set(center.x, center.y, 0);
-    auraOuterPoints.position.set(center.x, center.y, 0);
+    trackParticleTrail(AURA_TRAIL, auraPoints, auraGeo.attributes.position.array, now, 420, false);
+    if (auraMat.opacity <= 0) { auraPoints.visible = false; auraOuterPoints.visible = false; }
+    return;
   }
+  auraPoints.visible = true;
+  auraOuterPoints.visible = true;
+  auraMat.opacity = Math.min(1, auraMat.opacity + 0.08);
+  auraOuterMat.opacity = Math.min(0.75, auraOuterMat.opacity + 0.06);
 
-  const radiusBase = 190 + Math.min(160, danceEnergy * 6);
+  // Fairy-dust particles ride along the body's outline (not a blob centered in
+  // the chest) so they visually wrap around the person instead of sitting inside them.
+  const outline = buildBodyOutline(posePts);
+  const bodyScale = Math.max(60, dist(posePts[11], posePts[23])) / 130;
+
   const positions = auraGeo.attributes.position.array;
+  const colors = auraGeo.attributes.color.array;
   for (let i = 0; i < AURA_COUNT; i++) {
-    const a = i * 12.9898 + now * 0.0012 * (1 + (i % 5) * 0.1);
-    const b = i * 0.71 + now * 0.0007;
-    const rr = radiusBase * (0.3 + ((i * 53) % 100) / 100 * 0.8);
-    positions[i * 3] = Math.cos(a) * rr;
-    positions[i * 3 + 1] = Math.sin(a) * rr * (0.55 + 0.35 * Math.sin(b));
-    positions[i * 3 + 2] = Math.sin(b) * 120;
+    const t = i / AURA_COUNT + now * 0.00014;
+    const p = pointOnOutline(outline, t);
+    const flutter = Math.sin(now * 0.008 + i * 2.7) * 14 * bodyScale;
+    const breathe = 16 + (Math.sin(now * 0.0016 + i * 1.3) * .5 + .5) * 44 * bodyScale;
+    const off = breathe + flutter;
+    positions[i * 3] = p.x + p.nx * off;
+    positions[i * 3 + 1] = p.y + p.ny * off;
+    positions[i * 3 + 2] = Math.sin(now * 0.003 + i) * 40;
+
+    const twinkle = 0.3 + 0.7 * Math.max(0, Math.sin(now * 0.01 + i * 4.13));
+    colors[i * 3] = auraBaseColors[i * 3] * twinkle;
+    colors[i * 3 + 1] = auraBaseColors[i * 3 + 1] * twinkle;
+    colors[i * 3 + 2] = auraBaseColors[i * 3 + 2] * twinkle;
   }
   auraGeo.attributes.position.needsUpdate = true;
-  auraPoints.rotation.z += 0.006;
-  trackParticleTrail(AURA_TRAIL, auraPoints, positions, now, 420, !!center);
+  auraGeo.attributes.color.needsUpdate = true;
+  trackParticleTrail(AURA_TRAIL, auraPoints, positions, now, 420, true);
 
-  const outerRadiusBase = radiusBase * 1.9;
   const outerPositions = auraOuterGeo.attributes.position.array;
+  const outerColors = auraOuterGeo.attributes.color.array;
   for (let i = 0; i < AURA_OUTER_COUNT; i++) {
-    const a = i * 9.37 - now * 0.0006 * (1 + (i % 4) * 0.08);
-    const b = i * 0.53 + now * 0.0004;
-    const rr = outerRadiusBase * (0.6 + ((i * 41) % 100) / 100 * 0.55);
-    outerPositions[i * 3] = Math.cos(a) * rr;
-    outerPositions[i * 3 + 1] = Math.sin(a) * rr * (0.6 + 0.3 * Math.sin(b));
-    outerPositions[i * 3 + 2] = Math.sin(b) * 160;
+    const t = i / AURA_OUTER_COUNT - now * 0.00009;
+    const p = pointOnOutline(outline, t);
+    const breathe = 60 + (Math.sin(now * 0.0011 + i * .9) * .5 + .5) * 70 * bodyScale;
+    outerPositions[i * 3] = p.x + p.nx * breathe;
+    outerPositions[i * 3 + 1] = p.y + p.ny * breathe;
+    outerPositions[i * 3 + 2] = Math.cos(now * 0.002 + i) * 60;
+
+    const twinkle = 0.25 + 0.75 * Math.max(0, Math.sin(now * 0.007 + i * 3.7));
+    outerColors[i * 3] = auraOuterBaseColors[i * 3] * twinkle;
+    outerColors[i * 3 + 1] = auraOuterBaseColors[i * 3 + 1] * twinkle;
+    outerColors[i * 3 + 2] = auraOuterBaseColors[i * 3 + 2] * twinkle;
   }
   auraOuterGeo.attributes.position.needsUpdate = true;
-  auraOuterPoints.rotation.z -= 0.0035;
+  auraOuterGeo.attributes.color.needsUpdate = true;
 }
 
 function updatePillar(now) {
